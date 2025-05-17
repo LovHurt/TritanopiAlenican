@@ -1,9 +1,14 @@
-// src/LiveScreen.tsx
 import React, {useEffect, useState} from 'react';
-import {Platform, PermissionsAndroid, StyleSheet, Text, View} from 'react-native';
+import {
+  Platform,
+  PermissionsAndroid,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import {
   Camera,
-  useCameraDevices,
+  useCameraDevice,            // ← singular, from vision-camera
   useSkiaFrameProcessor,
 } from 'react-native-vision-camera';
 import {Skia} from '@shopify/react-native-skia';
@@ -12,62 +17,65 @@ import {tritanopiaEffect} from './TritanopiaShader';
 
 export default function LiveScreen() {
   const {width, height} = useWindowDimensions();
-  const devices = useCameraDevices(); // CameraDevice[]
-  const device = devices.find(d => d.position === 'back');
+  const device           = useCameraDevice('back');      // ← one CameraDevice | null
   const [hasPermission, setHasPermission] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const status = await Camera.requestCameraPermission();
-      // @ts-ignore: bazen tipler uyuşmuyor
-      setHasPermission(status === 'authorized');
+      // 1) Vision-Camera permission
+      const status = await Camera.getCameraPermissionStatus();
+      setHasPermission(status === 'granted');
+
+      // 2) Android runtime permission
       if (Platform.OS === 'android') {
-        await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA);
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          {
+            title: 'Kamera İzni',
+            message: 'Canlı filtre için kameraya izin verin',
+            buttonPositive: 'Tamam',
+          }
+        );
+        setHasPermission(prev => prev || result === PermissionsAndroid.RESULTS.GRANTED);
       }
     })();
   }, []);
 
-  // Skia Frame Processor
+  // 3) Skia frame processor (unchanged)
   const frameProcessor = useSkiaFrameProcessor(frame => {
     'worklet';
-    // 1) İlk önce sahneyi (frame) render et
-    //    (kamera görüntüsünü kendisi çiziyor)
-    // 2) Brettel tritanopi shader'ını runtime shader olarak sar
-    const paint = Skia.Paint();
+    const paint         = Skia.Paint();
     const shaderBuilder = Skia.RuntimeShaderBuilder(tritanopiaEffect);
-    const imageFilter = Skia.ImageFilter.MakeRuntimeShader(
-      shaderBuilder,
-      null,
-      null,
-    );
+    const imageFilter   =
+      Skia.ImageFilter.MakeRuntimeShader(shaderBuilder, null, null);
     paint.setImageFilter(imageFilter);
-    // 3) paint içindeki tritanopi filtresini uygula
     frame.render(paint);
   }, []);
 
-if (!device || !hasPermission) {
-  return (
-    <View style={[StyleSheet.absoluteFill, { backgroundColor: 'black', justifyContent: 'center', alignItems: 'center' }]}>
-      <Text style={{ color: 'white', fontSize: 18, textAlign: 'center' }}>
-        { !hasPermission
-          ? 'Kamera izni bekleniyor…'
-          : 'Arka kamera bulunamadı…'}
-      </Text>
-    </View>
-  );
-}
+  // 4) While waiting for permission or device
+  if (!device || !hasPermission) {
+    return (
+      <View style={[StyleSheet.absoluteFill, {
+        backgroundColor: 'black',
+        justifyContent: 'center',
+        alignItems: 'center',
+      }]}>
+        <Text style={{ color: 'white', fontSize: 18, textAlign: 'center' }}>
+          { !hasPermission
+            ? 'Kamera izni bekleniyor…'
+            : 'Arka kamera bulunamadı…' }
+        </Text>
+      </View>
+    );
+  }
 
-console.log('📷 VisionCamera.devices =', devices);
-console.log('🎯 selected device =', device);
-console.log('✅ hasPermission =', hasPermission);
-
+  // 5) Finally render the Camera
   return (
-    <>
     <Camera
       style={StyleSheet.absoluteFill}
       device={device}
-      isActive
+      isActive={true}
       frameProcessor={frameProcessor}
     />
-</>  );
+  );
 }
