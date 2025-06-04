@@ -11,24 +11,22 @@ import {
   Camera,
   useCameraDevice,
   useSkiaFrameProcessor,
-  // runAtTargetFps, // We'll remove this from the processor for now
 } from 'react-native-vision-camera';
-import type { CameraDeviceFormat } from 'react-native-vision-camera'; // Import type for clarity
+import type { CameraDeviceFormat } from 'react-native-vision-camera';
 import { Skia, SkPaint, SkImageFilter } from '@shopify/react-native-skia';
 import { useWindowDimensions } from 'react-native';
 import { tritanopiaEffect } from './TritanopiaShader';
 
-// Define a target FPS. Start lower to be safe, e.g., 15 or 20.
-const TARGET_FPS = 15;
+const TARGET_FPS = 25; 
+const MAX_RESOLUTION_WIDTH = 854;
+const MAX_RESOLUTION_HEIGHT = 480;
 
 export default function LiveScreen() {
   const { width, height } = useWindowDimensions();
   const device = useCameraDevice('back');
   const [hasPermission, setHasPermission] = useState(false);
 
-  /** ------------------------------------------------------------------
-   * 1️⃣  Kamera izinleri
-   * ------------------------------------------------------------------ */
+  // ... (useEffect for permissions - no change)
   useEffect(() => {
     (async () => {
       let cameraPermission = await Camera.getCameraPermissionStatus();
@@ -53,9 +51,7 @@ export default function LiveScreen() {
     })();
   }, []);
 
-  /** ------------------------------------------------------------------
-   * 2️⃣  Skia objelerini bir kez oluştur
-   * ------------------------------------------------------------------ */
+  // ... (useMemo for paint - no change)
   const paint = useMemo<SkPaint>(() => {
     const p = Skia.Paint();
     const builder = Skia.RuntimeShaderBuilder(tritanopiaEffect);
@@ -68,9 +64,6 @@ export default function LiveScreen() {
     return p;
   }, []);
 
-  /** ------------------------------------------------------------------
-   * 3️⃣  Küçük, TARGET_FPS’lik video formatını seç
-   * ------------------------------------------------------------------ */
   const format = useMemo(() => {
     if (!device) return undefined;
 
@@ -80,69 +73,93 @@ export default function LiveScreen() {
     });
     
     const candidates = device.formats.filter((f: CameraDeviceFormat) => {
+      const videoW = f.videoWidth ?? f.photoWidth;
+      const videoH = f.videoHeight ?? f.photoHeight;
+      
       const resOK =
-        (f.videoWidth ?? f.photoWidth) <= 1280 && // Prefer videoWidth if available
-        (f.videoHeight ?? f.photoHeight) <= 720;
+        videoW <= MAX_RESOLUTION_WIDTH && 
+        videoH <= MAX_RESOLUTION_HEIGHT;
 
-      const fpsOK =
-        // @ts-ignore legacy VisionCamera types
-        (f.minFps ?? 0) <= TARGET_FPS && (f.maxFps ?? 0) >= TARGET_FPS;
+      // @ts-ignore legacy VisionCamera types 
+      const fpsOK = ((f as any).minFps ?? 0) <= TARGET_FPS && ((f as any).maxFps ?? 0) >= TARGET_FPS;
       
       return resOK && fpsOK;
     });
 
     if (candidates.length === 0) {
-      console.warn(`[CameraFormat] No candidate format found for ${TARGET_FPS} FPS and <= 720p. Using device default format (index 0). This might be high resolution/FPS.`);
-      return device.formats[0]; // Fallback, could be problematic
+      console.warn(`[CameraFormat] No candidate format found for ${TARGET_FPS} FPS and <= ${MAX_RESOLUTION_WIDTH}x${MAX_RESOLUTION_HEIGHT}. Trying fallback (any resolution supporting ${TARGET_FPS} FPS).`);
+      
+      let fallbackCandidates = device.formats.filter((f: CameraDeviceFormat) => {
+        // @ts-ignore legacy VisionCamera types
+        const fpsOK = ((f as any).minFps ?? 0) <= TARGET_FPS && ((f as any).maxFps ?? 0) >= TARGET_FPS;
+        return fpsOK;
+      });
+
+      if (fallbackCandidates.length > 0) {
+         fallbackCandidates.sort((a, b) => {
+            const aRes = ((a.videoWidth ?? a.photoWidth) * (a.videoHeight ?? a.photoHeight));
+            const bRes = ((b.videoWidth ?? b.photoWidth) * (b.videoHeight ?? b.photoHeight));
+            if (aRes !== bRes) return aRes - bRes; // ASCENDING resolution for safety
+
+            const aMinFps = (a as any).minFps ?? 0;
+            const aMaxFps = (a as any).maxFps ?? 0;
+            const bMinFps = (b as any).minFps ?? 0;
+            const bMaxFps = (b as any).maxFps ?? 0;
+            const aSupportsTargetExactly = (aMinFps === TARGET_FPS && aMaxFps === TARGET_FPS);
+            const bSupportsTargetExactly = (bMinFps === TARGET_FPS && bMaxFps === TARGET_FPS);
+            if (aSupportsTargetExactly && !bSupportsTargetExactly) return -1;
+            if (!aSupportsTargetExactly && bSupportsTargetExactly) return 1;
+            return (aMaxFps ?? Infinity) - (bMaxFps ?? Infinity); 
+         });
+         const fallbackSelected = fallbackCandidates[0];
+         console.warn(`[CameraFormat] Fallback: Selected smallest resolution format supporting ${TARGET_FPS} FPS: ${fallbackSelected.videoWidth}x${fallbackSelected.videoHeight}, FPS: ${(fallbackSelected as any).minFps}-${(fallbackSelected as any).maxFps}`);
+         return fallbackSelected;
+      } else {
+        console.error(`[CameraFormat] Critical Fallback: No format supports ${TARGET_FPS} FPS. Using absolute device default (index 0). High risk of issues.`);
+        if (device.formats.length > 0) return device.formats[0];
+        return undefined;
+      }
     }
 
-    // Sort by resolution (ascending), then by how well it matches TARGET_FPS
     candidates.sort((a, b) => {
       const aRes = (a.videoWidth ?? a.photoWidth) * (a.videoHeight ?? a.photoHeight);
-      const bRes = (b.videoWidth ?? b.photoWidth) * (b.videoHeight ?? b.photoHeight);
-      if (aRes !== bRes) return aRes - bRes;
+      const bRes = (b.videoWidth ?? b.photoWidth) * (b.videoHeight ?? a.photoHeight);
+      if (aRes !== bRes) return bRes - aRes; // DESCENDING resolution
 
-      // Prioritize formats that can hit TARGET_FPS exactly or narrowly
-      const aSupportsTargetExactly = (a.minFps === TARGET_FPS && a.maxFps === TARGET_FPS);
-      const bSupportsTargetExactly = (b.minFps === TARGET_FPS && b.maxFps === TARGET_FPS);
+      const aMinFps = (a as any).minFps ?? 0;
+      const aMaxFps = (a as any).maxFps ?? 0;
+      const bMinFps = (b as any).minFps ?? 0;
+      const bMaxFps = (b as any).maxFps ?? 0;
+
+      const aSupportsTargetExactly = (aMinFps === TARGET_FPS && aMaxFps === TARGET_FPS);
+      const bSupportsTargetExactly = (bMinFps === TARGET_FPS && bMaxFps === TARGET_FPS);
       if (aSupportsTargetExactly && !bSupportsTargetExactly) return -1;
       if (!aSupportsTargetExactly && bSupportsTargetExactly) return 1;
       
-      return 0; // Or further sort by smallest max FPS if desired
+      return (aMaxFps ?? Infinity) - (bMaxFps ?? Infinity);
     });
     
     const selectedFormat = candidates[0];
-    console.log(`[CameraFormat] Selected format: Res: ${selectedFormat.videoWidth}x${selectedFormat.videoHeight}, FPS: ${selectedFormat.minFps}-${selectedFormat.maxFps}`);
+    console.log(`[CameraFormat] Selected format (prioritizing quality up to ${MAX_RESOLUTION_WIDTH}x${MAX_RESOLUTION_HEIGHT}): Res: ${selectedFormat.videoWidth}x${selectedFormat.videoHeight}, FPS: ${(selectedFormat as any).minFps}-${(selectedFormat as any).maxFps}`);
     return selectedFormat;
   }, [device]);
 
-  /** ------------------------------------------------------------------
-   * 4️⃣  Frame Processor
-   * ------------------------------------------------------------------ */
+  // ... (useSkiaFrameProcessor - no change)
   const frameProcessor = useSkiaFrameProcessor((frame) => {
     'worklet';
-    // The `frame` object here is the one that needs to be managed.
-    // We will render every frame the camera provides at TARGET_FPS.
-    // `frame.close()` MUST be called for every frame if not handled automatically
-    // by the Skia plugin in your Vision Camera version. Given the OOM,
-    // it's safer to ensure it's called.
     try {
-      if (frame.isValid) { // Check if frame is still valid before rendering
+      if (frame.isValid) { 
          frame.render(paint);
       }
     } finally {
-      // ALWAYS close the frame.
       if (frame.isValid) {
         // @ts-expect-error: Your comment indicates `close()` exists natively.
-        // If using VCv3 + Skia plugin, this might eventually be removed if auto-close is confirmed working.
         frame.close?.();
       }
     }
-  }, [paint]); // Dependencies: only 'paint' as it's stable.
+  }, [paint]); 
 
-  /** ------------------------------------------------------------------
-   * 5️⃣  İzin / cihaz kontrolü
-   * ------------------------------------------------------------------ */
+  // ... (UI rendering logic - no change)
   if (!hasPermission) {
     return (
       <View style={styles.centeredMessageContainer}>
@@ -157,7 +174,7 @@ export default function LiveScreen() {
       </View>
     );
   }
-  if (!format) { // Wait for format to be calculated
+  if (!format) { 
     return (
       <View style={styles.centeredMessageContainer}>
         <Text style={styles.messageText}>Kamera formatı ayarlanıyor…</Text>
@@ -165,22 +182,17 @@ export default function LiveScreen() {
     );
   }
 
-  /** ------------------------------------------------------------------
-   * 6️⃣  Nihai render
-   * ------------------------------------------------------------------ */
   return (
     <Camera
       style={StyleSheet.absoluteFill}
       device={device}
-      format={format} // Use the carefully selected format
-      fps={TARGET_FPS} // Set the camera's FPS to our target
-      videoStabilizationMode="off" // Good for performance
-      isActive={true} // Ensure camera is active
-      pixelFormat="yuv" // Generally efficient
-      enableBufferCompression={true} // Good for performance
+      format={format} 
+      fps={TARGET_FPS} 
+      videoStabilizationMode="off" 
+      isActive={true} 
+      pixelFormat="yuv" 
+      enableBufferCompression={true} 
       frameProcessor={frameProcessor}
-      // Consider adding onError prop to Camera for more diagnostics
-      // onError={(error) => console.error("Camera Error:", error)}
     />
   );
 }
