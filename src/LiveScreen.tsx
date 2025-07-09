@@ -1,32 +1,39 @@
-// src/LiveScreen.tsx
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react'; // useRef eklendi
 import {
   Platform,
   PermissionsAndroid,
   StyleSheet,
   Text,
   View,
+  TouchableOpacity,
+  Alert,
+  ActivityIndicator,
 } from 'react-native';
+import { CameraRoll } from "@react-native-camera-roll/camera-roll";
+import RNFS from 'react-native-fs';
 import {
   Camera,
   useCameraDevice,
   useSkiaFrameProcessor,
+  Frame,
 } from 'react-native-vision-camera';
-import type { CameraDeviceFormat } from 'react-native-vision-camera';
-import { Skia, SkPaint, SkImageFilter } from '@shopify/react-native-skia';
-import { useWindowDimensions } from 'react-native';
+import type { CameraDeviceFormat, Camera as VisionCamera } from 'react-native-vision-camera'; // Camera tipi eklendi
+import { Skia, SkPaint, SkImageFilter, SkImage } from '@shopify/react-native-skia';
 import { tritanopiaEffect } from './TritanopiaShader';
+// runOnJS ve useSharedValue'ya artık bu yöntemde ihtiyacımız yok.
 
-const TARGET_FPS = 25; 
+const TARGET_FPS = 20;
 const MAX_RESOLUTION_WIDTH = 854;
 const MAX_RESOLUTION_HEIGHT = 480;
 
 export default function LiveScreen() {
-  const { width, height } = useWindowDimensions();
   const device = useCameraDevice('back');
+  const camera = useRef<VisionCamera>(null); // DEĞİŞİKLİK: Kamera referansı oluşturuldu.
   const [hasPermission, setHasPermission] = useState(false);
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
 
-  // ... (useEffect for permissions - no change)
+  // captureNextFrameTrigger'a artık gerek yok.
+
   useEffect(() => {
     (async () => {
       let cameraPermission = await Camera.getCameraPermissionStatus();
@@ -36,137 +43,122 @@ export default function LiveScreen() {
       let currentHasPermission = cameraPermission === 'granted';
 
       if (Platform.OS === 'android') {
-        const result = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.CAMERA,
-          {
-            title: 'Kamera İzni',
-            message: 'Canlı filtre için kameraya izin verin',
-            buttonPositive: 'Tamam',
-          }
-        );
-        currentHasPermission =
-          currentHasPermission || result === PermissionsAndroid.RESULTS.GRANTED;
+        // Android 13 (API 33) ve üzeri için WRITE_EXTERNAL_STORAGE izni gerekmez.
+        // CameraRoll bunu kendi içinde yönetir.
+        if (Platform.Version < 33) {
+            const writePermissionResult = await PermissionsAndroid.request(
+              PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+              { title: 'Galeriye Yazma İzni', message: 'Çekilen fotoğrafları kaydetmek için izin verin.', buttonPositive: 'Tamam'}
+            );
+            currentHasPermission = currentHasPermission && writePermissionResult === PermissionsAndroid.RESULTS.GRANTED;
+        }
       }
       setHasPermission(currentHasPermission);
     })();
   }, []);
 
-  // ... (useMemo for paint - no change)
-  const paint = useMemo<SkPaint>(() => {
+  const tritanopiaPaint = useMemo<SkPaint>(() => {
     const p = Skia.Paint();
     const builder = Skia.RuntimeShaderBuilder(tritanopiaEffect);
-    const filter: SkImageFilter = Skia.ImageFilter.MakeRuntimeShader(
-      builder,
-      null,
-      null
-    );
+    const filter: SkImageFilter = Skia.ImageFilter.MakeRuntimeShader(builder, null, null);
     p.setImageFilter(filter);
     return p;
   }, []);
 
   const format = useMemo(() => {
+    // Bu format seçme mantığı canlı önizleme için harika, aynen kalabilir.
     if (!device) return undefined;
-
-    console.log('[CameraFormat] Available formats for back camera:');
-    device.formats.forEach((f: CameraDeviceFormat, index: number) => {
-      console.log(`[CameraFormat] [${index}] Res: ${f.videoWidth}x${f.videoHeight}, FPS: min ${'minFps' in f ? (f as any).minFps : 'n/a'} – max ${'maxFps' in f ? (f as any).maxFps : 'n/a'}, PhotoRes: ${f.photoWidth}x${f.photoHeight}`);
-    });
-    
-    const candidates = device.formats.filter((f: CameraDeviceFormat) => {
+    const candidates = device.formats.filter((f) => {
       const videoW = f.videoWidth ?? f.photoWidth;
       const videoH = f.videoHeight ?? f.photoHeight;
-      
-      const resOK =
-        videoW <= MAX_RESOLUTION_WIDTH && 
-        videoH <= MAX_RESOLUTION_HEIGHT;
-
-      // @ts-ignore legacy VisionCamera types 
+      const resOK = videoW <= MAX_RESOLUTION_WIDTH && videoH <= MAX_RESOLUTION_HEIGHT;
       const fpsOK = ((f as any).minFps ?? 0) <= TARGET_FPS && ((f as any).maxFps ?? 0) >= TARGET_FPS;
-      
       return resOK && fpsOK;
     });
 
-    if (candidates.length === 0) {
-      console.warn(`[CameraFormat] No candidate format found for ${TARGET_FPS} FPS and <= ${MAX_RESOLUTION_WIDTH}x${MAX_RESOLUTION_HEIGHT}. Trying fallback (any resolution supporting ${TARGET_FPS} FPS).`);
-      
-      let fallbackCandidates = device.formats.filter((f: CameraDeviceFormat) => {
-        // @ts-ignore legacy VisionCamera types
-        const fpsOK = ((f as any).minFps ?? 0) <= TARGET_FPS && ((f as any).maxFps ?? 0) >= TARGET_FPS;
-        return fpsOK;
-      });
-
-      if (fallbackCandidates.length > 0) {
-         fallbackCandidates.sort((a, b) => {
-            const aRes = ((a.videoWidth ?? a.photoWidth) * (a.videoHeight ?? a.photoHeight));
-            const bRes = ((b.videoWidth ?? b.photoWidth) * (b.videoHeight ?? b.photoHeight));
-            if (aRes !== bRes) return aRes - bRes; // ASCENDING resolution for safety
-
-            const aMinFps = (a as any).minFps ?? 0;
-            const aMaxFps = (a as any).maxFps ?? 0;
-            const bMinFps = (b as any).minFps ?? 0;
-            const bMaxFps = (b as any).maxFps ?? 0;
-            const aSupportsTargetExactly = (aMinFps === TARGET_FPS && aMaxFps === TARGET_FPS);
-            const bSupportsTargetExactly = (bMinFps === TARGET_FPS && bMaxFps === TARGET_FPS);
-            if (aSupportsTargetExactly && !bSupportsTargetExactly) return -1;
-            if (!aSupportsTargetExactly && bSupportsTargetExactly) return 1;
-            return (aMaxFps ?? Infinity) - (bMaxFps ?? Infinity); 
-         });
-         const fallbackSelected = fallbackCandidates[0];
-         console.warn(`[CameraFormat] Fallback: Selected smallest resolution format supporting ${TARGET_FPS} FPS: ${fallbackSelected.videoWidth}x${fallbackSelected.videoHeight}, FPS: ${(fallbackSelected as any).minFps}-${(fallbackSelected as any).maxFps}`);
-         return fallbackSelected;
-      } else {
-        console.error(`[CameraFormat] Critical Fallback: No format supports ${TARGET_FPS} FPS. Using absolute device default (index 0). High risk of issues.`);
-        if (device.formats.length > 0) return device.formats[0];
-        return undefined;
-      }
+    if (candidates.length > 0) {
+        candidates.sort((a,b) => (b.videoWidth*b.videoHeight) - (a.videoWidth*a.videoHeight));
+        return candidates[0];
     }
-
-    candidates.sort((a, b) => {
-      const aRes = (a.videoWidth ?? a.photoWidth) * (a.videoHeight ?? a.photoHeight);
-      const bRes = (b.videoWidth ?? b.photoWidth) * (b.videoHeight ?? a.photoHeight);
-      if (aRes !== bRes) return bRes - aRes; // DESCENDING resolution
-
-      const aMinFps = (a as any).minFps ?? 0;
-      const aMaxFps = (a as any).maxFps ?? 0;
-      const bMinFps = (b as any).minFps ?? 0;
-      const bMaxFps = (b as any).maxFps ?? 0;
-
-      const aSupportsTargetExactly = (aMinFps === TARGET_FPS && aMaxFps === TARGET_FPS);
-      const bSupportsTargetExactly = (bMinFps === TARGET_FPS && bMaxFps === TARGET_FPS);
-      if (aSupportsTargetExactly && !bSupportsTargetExactly) return -1;
-      if (!aSupportsTargetExactly && bSupportsTargetExactly) return 1;
-      
-      return (aMaxFps ?? Infinity) - (bMaxFps ?? Infinity);
-    });
     
-    const selectedFormat = candidates[0];
-    console.log(`[CameraFormat] Selected format (prioritizing quality up to ${MAX_RESOLUTION_WIDTH}x${MAX_RESOLUTION_HEIGHT}): Res: ${selectedFormat.videoWidth}x${selectedFormat.videoHeight}, FPS: ${(selectedFormat as any).minFps}-${(selectedFormat as any).maxFps}`);
-    return selectedFormat;
+    // Fallback logic
+    return device.formats.sort((a, b) => b.photoWidth - a.photoWidth)[0];
+
   }, [device]);
 
-  // ... (useSkiaFrameProcessor - no change)
-  const frameProcessor = useSkiaFrameProcessor((frame) => {
+  // DEĞİŞİKLİK: Frame processor artık sadece canlı önizlemeyi filtrelemek için kullanılıyor.
+  // Fotoğraf kaydetme mantığı buradan çıkarıldı.
+  const frameProcessor = useSkiaFrameProcessor((frame: Frame) => {
     'worklet';
-    try {
-      if (frame.isValid) { 
-         frame.render(paint);
-      }
-    } finally {
-      if (frame.isValid) {
-        // @ts-expect-error: Your comment indicates `close()` exists natively.
-        frame.close?.();
-      }
-    }
-  }, [paint]); 
+    // @ts-ignore
+    frame.render(tritanopiaPaint);
+  }, [tritanopiaPaint]);
 
-  // ... (UI rendering logic - no change)
+  const onCapturePhoto = async () => {
+    if (isProcessingPhoto || !camera.current) return;
+    
+    console.log("Fotoğraf çekme işlemi başlatılıyor...");
+    setIsProcessingPhoto(true);
+
+    try {
+      const photo = await camera.current.takePhoto({
+        enableShutterSound: true,
+      });
+      console.log(`Fotoğraf çekildi: ${photo.path}`);
+
+      // RNFS'in doğru çalışması için path'in başındaki 'file://' ifadesini kaldırıyoruz.
+      const correctPath = photo.path.replace('file://', '');
+
+      // Değiştirilmiş path'i kullanarak dosyayı oku.
+      const imageBase64 = await RNFS.readFile(correctPath, 'base64');
+      
+      const skImage = Skia.Image.MakeImageFromEncoded(Skia.Data.fromBase64(imageBase64));
+      if (!skImage) {
+        throw new Error('Skia görseli oluşturulamadı.');
+      }
+      console.log(`Skia görseli oluşturuldu: ${skImage.width()}x${skImage.height()}`);
+      
+      const surface = Skia.Surface.MakeOffscreen(skImage.width(), skImage.height());
+      if (!surface) {
+        throw new Error('Skia yüzeyi oluşturulamadı.');
+      }
+      const canvas = surface.getCanvas();
+      canvas.drawImage(skImage, 0, 0, tritanopiaPaint);
+      console.log("Filtre uygulandı.");
+
+      const processedImage = surface.makeImageSnapshot();
+      const processedBase64 = processedImage.encodeToBase64();
+      console.log("Filtrelenmiş görsel base64'e çevrildi.");
+
+      // CameraRoll doğrudan 'file://' ile başlayan yolu tercih edebilir, bu yüzden orjinalini kullanmak daha güvenli.
+      const tempPathForSave = `${RNFS.CachesDirectoryPath}/filtered_${Date.now()}.png`;
+      await RNFS.writeFile(tempPathForSave, processedBase64, 'base64');
+      await CameraRoll.save(`file://${tempPathForSave}`, { type: 'photo' });
+
+      console.log("Fotoğraf galeriye başarıyla kaydedildi!");
+      Alert.alert('Başarılı', 'Filtrelenmiş fotoğraf galeriye kaydedildi.');
+
+      skImage.dispose();
+      processedImage.dispose();
+      surface.dispose();
+
+    } catch (e: any) {
+      console.error("Fotoğraf çekme/işleme hatası:", e);
+      Alert.alert('Hata', `Bir sorun oluştu: ${e.message}`);
+    } finally {
+      setIsProcessingPhoto(false);
+    }
+  };
+
   if (!hasPermission) {
     return (
       <View style={styles.centeredMessageContainer}>
-        <Text style={styles.messageText}>Kamera izni bekleniyor…</Text>
+        <Text style={styles.messageText}>İzinler bekleniyor veya verilmedi…</Text>
+        <ActivityIndicator size="large" color="white" style={{marginTop: 20}}/>
       </View>
     );
   }
+  
   if (!device) {
     return (
       <View style={styles.centeredMessageContainer}>
@@ -174,40 +166,56 @@ export default function LiveScreen() {
       </View>
     );
   }
-  if (!format) { 
-    return (
-      <View style={styles.centeredMessageContainer}>
-        <Text style={styles.messageText}>Kamera formatı ayarlanıyor…</Text>
-      </View>
-    );
-  }
 
   return (
-    <Camera
-      style={StyleSheet.absoluteFill}
-      device={device}
-      format={format} 
-      fps={TARGET_FPS} 
-      videoStabilizationMode="off" 
-      isActive={true} 
-      pixelFormat="yuv" 
-      enableBufferCompression={true} 
-      frameProcessor={frameProcessor}
-    />
+    <View style={StyleSheet.absoluteFill}>
+      <Camera
+        ref={camera} 
+        style={StyleSheet.absoluteFill}
+        device={device}
+        format={format}
+        fps={TARGET_FPS}
+        isActive={true}
+        photo={true} 
+        frameProcessor={frameProcessor}
+        pixelFormat='yuv' 
+      />
+      
+      {isProcessingPhoto && (
+        <View style={styles.loadingOverlay}>
+          <ActivityIndicator size="large" color="white" />
+          <Text style={styles.loadingText}>Fotoğraf işleniyor...</Text> 
+        </View>
+      )}
+
+      <View style={styles.buttonContainer}>
+        <TouchableOpacity 
+          style={[styles.captureButton, isProcessingPhoto && styles.captureButtonDisabled]} 
+          onPress={onCapturePhoto} 
+          disabled={isProcessingPhoto}
+        />
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  centeredMessageContainer: {
-    flex: 1,
-    backgroundColor: 'black',
+  centeredMessageContainer: { flex: 1, backgroundColor: 'black', justifyContent: 'center', alignItems: 'center' },
+  messageText: { color: 'white', fontSize: 18, textAlign: 'center', paddingHorizontal: 20 },
+  buttonContainer: { position: 'absolute', bottom: 50, width: '100%', alignItems: 'center' },
+  captureButton: { width: 70, height: 70, borderRadius: 35, backgroundColor: 'white', borderWidth: 5, borderColor: 'rgba(0,0,0,0.2)'},
+  captureButtonDisabled: {
+    backgroundColor: 'grey',
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.7)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  messageText: {
+  loadingText: {
     color: 'white',
-    fontSize: 18,
-    textAlign: 'center',
-    paddingHorizontal: 20,
-  },
+    marginTop: 10,
+    fontSize: 16,
+  }
 });
