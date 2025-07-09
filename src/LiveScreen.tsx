@@ -94,43 +94,65 @@ export default function LiveScreen() {
     frame.render(tritanopiaPaint);
   }, [tritanopiaPaint]);
 
-  const onCapturePhoto = async () => {
+ const onCapturePhoto = async () => {
     if (isProcessingPhoto || !camera.current) return;
     
     console.log("Fotoğraf çekme işlemi başlatılıyor...");
     setIsProcessingPhoto(true);
 
+    const MAX_PROCESSING_DIMENSION = 1920;
+
     try {
       const photo = await camera.current.takePhoto({
         enableShutterSound: true,
       });
-      console.log(`Fotoğraf çekildi: ${photo.path}`);
+      console.log(`Yüksek çözünürlüklü fotoğraf çekildi: ${photo.path}`);
 
-      // RNFS'in doğru çalışması için path'in başındaki 'file://' ifadesini kaldırıyoruz.
-      const correctPath = photo.path.replace('file://', '');
-
-      // Değiştirilmiş path'i kullanarak dosyayı oku.
-      const imageBase64 = await RNFS.readFile(correctPath, 'base64');
-      
-      const skImage = Skia.Image.MakeImageFromEncoded(Skia.Data.fromBase64(imageBase64));
+      // 1. Adım: Fotoğrafı Base64'e ÇEVİRMEDEN, doğrudan URI'den verimli bir şekilde yükle.
+      // Bu, ilk çökme sorununu çözer.
+      const imageUri = `file://${photo.path}`;
+      const imageData = await Skia.Data.fromURI(imageUri);
+      if (!imageData) {
+        throw new Error('Skia, görsel verisini dosyadan yükleyemedi.');
+      }
+      const skImage = Skia.Image.MakeImageFromEncoded(imageData);
       if (!skImage) {
         throw new Error('Skia görseli oluşturulamadı.');
       }
-      console.log(`Skia görseli oluşturuldu: ${skImage.width()}x${skImage.height()}`);
+      const originalWidth = skImage.width();
+      const originalHeight = skImage.height();
+      console.log(`Orijinal görsel Skia'ya yüklendi: ${originalWidth}x${originalHeight}`);
       
-      const surface = Skia.Surface.MakeOffscreen(skImage.width(), skImage.height());
+      // 2. Adım: İşlem boyutlarını hesapla (Performans optimizasyonu)
+      // Orijinal en/boy oranını koruyarak görseli küçültüyoruz.
+      const scale = Math.min(MAX_PROCESSING_DIMENSION / originalWidth, MAX_PROCESSING_DIMENSION / originalHeight);
+      const targetWidth = Math.round(originalWidth * scale);
+      const targetHeight = Math.round(originalHeight * scale);
+      console.log(`İşlem için boyut küçültüldü: ${targetWidth}x${targetHeight}`);
+
+      // 3. Adım: Küçültülmüş boyutlarda bir yüzey (tuval) oluştur.
+      // Artık devasa 48MB'lık yüzeyler yerine çok daha küçük bir yüzey kullanıyoruz.
+      const surface = Skia.Surface.MakeOffscreen(targetWidth, targetHeight);
       if (!surface) {
         throw new Error('Skia yüzeyi oluşturulamadı.');
       }
       const canvas = surface.getCanvas();
-      canvas.drawImage(skImage, 0, 0, tritanopiaPaint);
-      console.log("Filtre uygulandı.");
 
+      // 4. Adım: Büyük orijinal görseli, küçük tuvalimize çizerek yeniden boyutlandır.
+      const srcRect = Skia.XYWHRect(0, 0, originalWidth, originalHeight);
+      const destRect = Skia.XYWHRect(0, 0, targetWidth, targetHeight);
+      canvas.drawImageRect(skImage, srcRect, destRect, tritanopiaPaint); // <-- Filtre burada uygulanıyor!
+      
+      console.log("Görsel yeniden boyutlandırıldı ve filtre uygulandı.");
+
+      // 5. Adım: Filtrelenmiş ve küçültülmüş görseli kaydet.
       const processedImage = surface.makeImageSnapshot();
-      const processedBase64 = processedImage.encodeToBase64();
+      const processedBase64 = processedImage.encodeToBase64(); // Sadece kaydetmek için Base64'e çevir
+       if (!processedBase64) {
+          throw new Error('İşlenmiş görsel Base64 formatına çevrilemedi.');
+      }
       console.log("Filtrelenmiş görsel base64'e çevrildi.");
 
-      // CameraRoll doğrudan 'file://' ile başlayan yolu tercih edebilir, bu yüzden orjinalini kullanmak daha güvenli.
       const tempPathForSave = `${RNFS.CachesDirectoryPath}/filtered_${Date.now()}.png`;
       await RNFS.writeFile(tempPathForSave, processedBase64, 'base64');
       await CameraRoll.save(`file://${tempPathForSave}`, { type: 'photo' });
@@ -138,6 +160,7 @@ export default function LiveScreen() {
       console.log("Fotoğraf galeriye başarıyla kaydedildi!");
       Alert.alert('Başarılı', 'Filtrelenmiş fotoğraf galeriye kaydedildi.');
 
+      // Belleği temizle!
       skImage.dispose();
       processedImage.dispose();
       surface.dispose();
@@ -148,7 +171,7 @@ export default function LiveScreen() {
     } finally {
       setIsProcessingPhoto(false);
     }
-  };
+};
 
   if (!hasPermission) {
     return (

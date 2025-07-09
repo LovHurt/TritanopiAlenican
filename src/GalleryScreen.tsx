@@ -6,8 +6,6 @@ import {
   Image as SkiaImage,
   useImage,
   Skia,
-  // Import the correct TYPES for SkPaint and SkImageFilter.
-  // Using 'type' makes it explicit that we are importing a type definition.
   type SkPaint,
   type SkImageFilter,
 } from '@shopify/react-native-skia';
@@ -25,15 +23,12 @@ export default function GalleryScreen() {
     });
   };
 
-  // Create the paint object with the shader filter, memoized for performance.
-  const tritanopiaPaint = useMemo<SkPaint>(() => { // <-- Use the correct type: SkPaint
+  const tritanopiaPaint = useMemo<SkPaint>(() => { 
     const p = Skia.Paint();
 
-    // FIX: You must create a builder from the effect first.
     const builder = Skia.RuntimeShaderBuilder(tritanopiaEffect);
     
-    // FIX: Then, pass the builder to MakeRuntimeShader.
-    const filter: SkImageFilter = Skia.ImageFilter.MakeRuntimeShader( // <-- Use the correct type: SkImageFilter
+    const filter: SkImageFilter = Skia.ImageFilter.MakeRuntimeShader(
       builder,
       null,
       null
@@ -59,8 +54,8 @@ export default function GalleryScreen() {
             image={image}
             x={0}
             y={0}
-            width={300}
-            height={300}
+            width={800}
+            height={800}
             fit="contain"
             paint={tritanopiaPaint}
           />
@@ -72,7 +67,7 @@ export default function GalleryScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, alignItems: 'center', padding: 16 },
-  image: { width: 300, height: 300, marginTop: 20 },
+  image: { width: 800, height: 800, marginTop: 20 },
   loadingContainer: {
     justifyContent: 'center',
     alignItems: 'center',
